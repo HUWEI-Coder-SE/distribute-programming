@@ -44,6 +44,19 @@ public class Client1 {
                 System.out.println("客户端1已完成写入操作，通知服务器。");
             }
 
+            // 请求退出前，再次进行查找操作
+            System.out.println("客户端1请求再次读取权限以进行查找操作。");
+            oos.writeObject("read");
+            response = (String) ois.readObject();
+            if ("read_granted".equals(response)) {
+                System.out.println("客户端1获得读取权限，开始再次查找数据...");
+                // 清理之前的临时数据
+                ClientData.setClosestValue(Integer.MAX_VALUE);
+                ClientData.setPositions(new ArrayList<>());
+                // 再次执行查找任务
+                searchAfterDeletion();
+            }
+
             // 请求退出
             oos.writeObject("exit");
             System.out.println("客户端1发送退出请求。");
@@ -134,6 +147,11 @@ public class Client1 {
         }
     }
 
+    // 在删除后再次进行查找的函数
+    private static void searchAfterDeletion() {
+        searchAndDelete(); // 直接调用原有的查找方法
+    }
+
     // 执行删除和更新操作
     private static void performDeletionAndUpdate() {
         try (RandomAccessFile raf = new RandomAccessFile(FILE_NAME, "rw")) {
@@ -151,8 +169,8 @@ public class Client1 {
 
             long startTime = System.currentTimeMillis(); // 开始计时
 
-            // 删除并移动数据
-            deleteIntegers(raf, startPos, length, valueToDelete, positions);
+            // 删除并移动数据，并统计删除的整数数量
+            int deletedCount = deleteIntegers(raf, startPos, length, valueToDelete, positions);
 
             long endTime = System.currentTimeMillis(); // 结束计时
 
@@ -172,13 +190,16 @@ public class Client1 {
 
             System.out.println("删除和更新操作完成，耗时：" + (endTime - startTime) + " 毫秒。");
 
+            // 打印删除的整数数量
+            System.out.println("客户端1共删除整数数量：" + deletedCount);
+
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    // 删除整数并移动数据
-    private static void deleteIntegers(RandomAccessFile raf, long startPos, long length, int valueToDelete, List<Long> positions) throws IOException {
+    // 删除整数并移动数据，返回删除的整数数量
+    private static int deleteIntegers(RandomAccessFile raf, long startPos, long length, int valueToDelete, List<Long> positions) throws IOException {
         raf.seek(startPos);
         long readPos = startPos;
         long writePos = startPos;
@@ -189,6 +210,8 @@ public class Client1 {
 
         long totalIntegers = length / 4;
         long currentIntegerIndex = 0;
+
+        int deletedCount = 0;
 
         while (readPos < endPos) {
             int bytesToRead = (int) Math.min(buffer.length, endPos - readPos);
@@ -207,6 +230,8 @@ public class Client1 {
                     raf.seek(writePos + validDataLength);
                     raf.writeInt(value);
                     validDataLength += 4;
+                } else {
+                    deletedCount++;
                 }
                 currentIntegerIndex++;
             }
@@ -217,6 +242,8 @@ public class Client1 {
         // 截断文件
         long oldLength = raf.length();
         raf.setLength(oldLength - positions.size() * 4);
+
+        return deletedCount;
     }
 
     // 读取文件头信息

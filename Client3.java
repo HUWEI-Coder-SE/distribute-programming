@@ -47,6 +47,16 @@ public class Client3 {
                 System.out.println("客户端3已完成写入操作，通知服务器。");
             }
 
+            // 请求退出前，再次进行查找操作
+            System.out.println("客户端3请求再次读取权限以进行查找操作。");
+            oos.writeObject("read");
+            response = (String) ois.readObject();
+            if ("read_granted".equals(response)) {
+                System.out.println("客户端3获得读取权限，开始再次查找数据...");
+                // 再次执行查找任务
+                searchAfterDeletion();
+            }
+
             // 请求退出
             oos.writeObject("exit");
             System.out.println("客户端3发送退出请求。");
@@ -62,7 +72,7 @@ public class Client3 {
         }
     }
 
-    // 查找不小于且最接近 1024 * 64 的整数
+    // 第一次查找并准备删除
     private static void searchAndDelete() {
         try (RandomAccessFile raf = new RandomAccessFile(FILE_NAME, "r")) {
             long[] header = readHeader(raf);
@@ -109,6 +119,9 @@ public class Client3 {
             int bit;
             long decodedIntegers = 0;
 
+            // 统计频率
+            Map<Integer, Integer> frequencies = new HashMap<>();
+
             while ((bit = bis.readBit()) != -1) {
                 bitPosition = bis.getBitPosition() - 1; // 获取当前位的位置
 
@@ -121,6 +134,8 @@ public class Client3 {
                 // 如果到达叶子节点，表示一个整数解码完成
                 if (currentNode.left == null && currentNode.right == null) {
                     int value = currentNode.value;
+
+                    frequencies.put(value, frequencies.getOrDefault(value, 0) + 1);
 
                     if (value >= targetValue) {
                         if (value < closestValue) {
@@ -148,6 +163,7 @@ public class Client3 {
                 System.out.println("查找完成，耗时：" + (endTime - startTime) + " 毫秒。");
                 System.out.println("找到的整数值：" + closestValue);
                 System.out.println("对应的指针位置（近似）：");
+                System.out.println("    出现次数：" + positions.size());
                 for (long pos : positions) {
                     System.out.println("    位置：" + pos);
                 }
@@ -158,6 +174,7 @@ public class Client3 {
             // 保存查找结果，供后续删除使用
             ClientData.setClosestValue(closestValue);
             ClientData.setPositions(positions);
+            ClientData.setFrequencies(frequencies);
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -166,10 +183,11 @@ public class Client3 {
 
     // 执行删除和更新操作
     private static void performDeletionAndUpdate() {
-        try (RandomAccessFile raf = new RandomAccessFile(FILE_NAME, "rw")) {
-            long[] header = readHeader(raf);
-            long startPos = header[4];
+        try {
+            long startTime = System.currentTimeMillis(); // 开始计时
 
+            // 获取频率表
+            Map<Integer, Integer> frequencies = ClientData.getFrequencies();
             int valueToDelete = ClientData.getClosestValue();
 
             if (valueToDelete == Integer.MAX_VALUE) {
@@ -177,20 +195,130 @@ public class Client3 {
                 return;
             }
 
-            // 删除前的压缩数据长度
-            long oldCompressedLength = raf.length() - startPos;
-            System.out.println("删除前的压缩数据长度：" + oldCompressedLength);
+            int deletedCount = frequencies.remove(valueToDelete);
+            System.out.println("客户端3共删除整数数量：" + deletedCount);
 
-            long startTime = System.currentTimeMillis(); // 开始计时
+            // 重新构建霍夫曼树和编码
+            HuffmanNode newRoot = buildHuffmanTreeFromFrequencies(frequencies);
+            Map<Integer, HuffmanCode> huffmanCodes = new HashMap<>();
+            generateCodes(newRoot, 0L, 0, huffmanCodes);
 
-            // 解码、删除、重新编码并写回文件
-            deleteAndRecompress(raf, startPos, valueToDelete);
+            // 保存新的霍夫曼树
+            saveHuffmanTree(newRoot);
 
-            long endTime = System.currentTimeMillis(); // 结束计时
+            // 编码数据并写入文件
+            System.out.println("客户端3开始重新编码并写入数据...");
 
-            // 删除后的压缩数据长度
-            long newCompressedLength = raf.length() - startPos;
-            System.out.println("删除后的压缩数据长度：" + newCompressedLength);
+            // 读取文件头信息
+            RandomAccessFile raf = new RandomAccessFile(FILE_NAME, "rw");
+            long[] header = readHeader(raf);
+            long startPos = header[4];
+            long length = header[5];
+
+            // 读取原始压缩数据
+            raf.seek(startPos);
+            byte[] compressedData = new byte[(int) length];
+            raf.readFully(compressedData);
+
+            // 准备解码和重新编码
+            BitInputStream bis = new BitInputStream(compressedData);
+            raf.setLength(startPos); // 截断文件，准备写入新的压缩数据
+            raf.seek(startPos);
+
+            BufferedOutputStream bos = new BufferedOutputStream(new RandomAccessFileOutputStream(raf));
+
+            HuffmanNode oldRoot = loadOldHuffmanTree(); // 加载旧的霍夫曼树，用于解码
+            if (oldRoot == null) {
+                System.out.println("无法加载旧的霍夫曼树，无法重新编码。");
+                return;
+            }
+
+            HuffmanNode currentNode = oldRoot;
+
+            long bitBuffer = 0L;
+            int bitBufferLength = 0;
+
+            int bufferSize = 8192; // 输出缓冲区大小
+            byte[] outputBuffer = new byte[bufferSize];
+            int outputBufferPos = 0;
+
+            int bit;
+            long decodedIntegers = 0;
+            long totalEncodedValues = 0;
+
+            long deletedIntegers = 0; // 实际删除的整数数量
+
+            // 添加调试信息，定期输出进度
+            long progressInterval = 10_000_000; // 每1000万整数输出一次进度
+            long nextProgress = progressInterval;
+
+            while ((bit = bis.readBit()) != -1) {
+                if (bit == 0) {
+                    currentNode = currentNode.left;
+                } else {
+                    currentNode = currentNode.right;
+                }
+
+                if (currentNode.left == null && currentNode.right == null) {
+                    int value = currentNode.value;
+
+                    if (value != valueToDelete) {
+                        HuffmanCode code = huffmanCodes.get(value);
+                        if (code == null) {
+                            System.out.println("警告：找不到整数 " + value + " 的霍夫曼编码！");
+                            continue;
+                        }
+
+                        // 将编码加入到位缓冲区中
+                        bitBuffer = (bitBuffer << code.codeLength) | code.codeBits;
+                        bitBufferLength += code.codeLength;
+
+                        // 当位缓冲区中有8位或以上时，提取字节写入输出缓冲区
+                        while (bitBufferLength >= 8) {
+                            bitBufferLength -= 8;
+                            int byteToWrite = (int) ((bitBuffer >> bitBufferLength) & 0xFF);
+                            outputBuffer[outputBufferPos++] = (byte) byteToWrite;
+
+                            // 如果输出缓冲区已满，写入到文件
+                            if (outputBufferPos == bufferSize) {
+                                bos.write(outputBuffer, 0, outputBufferPos);
+                                outputBufferPos = 0;
+                            }
+                        }
+
+                        totalEncodedValues++;
+                    } else {
+                        deletedIntegers++;
+                    }
+
+                    currentNode = oldRoot; // 重置为旧的霍夫曼树根节点
+
+                    decodedIntegers++;
+
+                    // 输出进度信息
+                    if (decodedIntegers >= nextProgress) {
+                        System.out.println("已处理整数数量：" + decodedIntegers);
+                        nextProgress += progressInterval;
+                    }
+                }
+            }
+
+            // 处理剩余的位
+            if (bitBufferLength > 0) {
+                int byteToWrite = (int) ((bitBuffer << (8 - bitBufferLength)) & 0xFF);
+                outputBuffer[outputBufferPos++] = (byte) byteToWrite;
+            }
+
+            // 将剩余的输出缓冲区写入文件
+            if (outputBufferPos > 0) {
+                bos.write(outputBuffer, 0, outputBufferPos);
+            }
+
+            bos.flush();
+            bos.close(); // 不会关闭 raf
+
+            long newCompressedLength = raf.getFilePointer() - startPos;
+            raf.setLength(raf.getFilePointer()); // 设置文件长度
 
             // 更新文件头信息
             header[5] = newCompressedLength;
@@ -202,192 +330,145 @@ public class Client3 {
             System.out.println("Part B 起始位置：" + header[2] + "，长度：" + header[3]);
             System.out.println("Part C 起始位置：" + header[4] + "，长度：" + header[5]);
 
-            System.out.println("删除和更新操作完成，耗时：" + (endTime - startTime) + " 毫秒。");
+            long endTime = System.currentTimeMillis(); // 结束计时
+            System.out.println("重新编码并写入数据完成，耗时：" + (endTime - startTime) + " 毫秒。");
+            System.out.println("总共重新编码整数数量：" + totalEncodedValues);
+            System.out.println("总共解码整数数量：" + decodedIntegers);
+            System.out.println("总共删除整数数量：" + deletedIntegers);
 
-            // 验证删除操作是否生效
-            verifyDeletion(raf, startPos, valueToDelete);
+            // 验证整数数量是否一致
+            if (decodedIntegers != totalEncodedValues + deletedIntegers) {
+                System.out.println("警告：解码的整数数量不等于重新编码的整数数量加上删除的整数数量！");
+            } else {
+                System.out.println("整数数量验证通过。");
+            }
+
+            raf.close();
 
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    // 删除指定的整数并重新编码
-    private static void deleteAndRecompress(RandomAccessFile raf, long startPos, int valueToDelete) throws IOException {
-        // 加载霍夫曼树
-        HuffmanNode root = loadHuffmanTree();
-        if (root == null) {
-            System.out.println("无法加载霍夫曼树，无法解压缩数据。");
-            return;
-        }
+    // 删除后再次查找下一个整数（无需删除）
+    private static void searchAfterDeletion() {
+        try (RandomAccessFile raf = new RandomAccessFile(FILE_NAME, "r")) {
+            long[] header = readHeader(raf);
+            long startPos = header[4];
+            long length = header[5];
 
-        // 解码压缩数据并统计频率
-        raf.seek(startPos);
-        byte[] compressedData = new byte[(int) (raf.length() - startPos)];
-        raf.readFully(compressedData);
+            System.out.println("客户端3读取的文件头信息（删除后）：");
+            System.out.println("Part C 起始位置：" + startPos + "，长度：" + length);
 
-        System.out.println("客户端3开始第一遍解码，统计频率...");
-
-        BitInputStream bis = new BitInputStream(compressedData);
-        int[] frequencies = new int[MAX_VALUE + 1];
-
-        HuffmanNode currentNode = root;
-        int bit;
-        long decodedIntegers = 0;
-        long bitPosition = 0;
-
-        List<Long> deletePositions = new ArrayList<>(); // 用于记录被删除的整数位置
-
-        while ((bit = bis.readBit()) != -1) {
-            bitPosition = bis.getBitPosition() - 1;
-
-            if (bit == 0) {
-                currentNode = currentNode.left;
-            } else {
-                currentNode = currentNode.right;
+            // 检查是否越界
+            long fileLength = raf.length();
+            if (startPos + length > fileLength) {
+                System.out.println("错误：要读取的数据超过文件长度。文件长度：" + fileLength);
+                return;
             }
 
-            if (currentNode.left == null && currentNode.right == null) {
-                int value = currentNode.value;
+            // 加载新的霍夫曼树
+            HuffmanNode root = loadHuffmanTree();
+            if (root == null) {
+                System.out.println("无法加载新的霍夫曼树，无法解压缩数据。");
+                return;
+            }
 
-                if (value != valueToDelete) {
-                    frequencies[value]++;
+            raf.seek(startPos);
+
+            long startTime = System.currentTimeMillis(); // 开始计时
+
+            // 将压缩的数据读取到字节数组
+            byte[] compressedData = new byte[(int) length];
+            raf.readFully(compressedData);
+
+            System.out.println("客户端3开始解码新的压缩数据...");
+
+            // 使用BitInputStream逐位读取数据
+            BitInputStream bis = new BitInputStream(compressedData);
+
+            int targetValue = 1024 * 64; // 65,536
+            int closestValue = Integer.MAX_VALUE;
+            List<Long> positions = new ArrayList<>(); // 存储指针位置（文件偏移量）
+
+            HuffmanNode currentNode = root;
+            long bitPosition = 0; // 当前位位置
+
+            int bit;
+            long decodedIntegers = 0;
+
+            Map<Integer, Integer> frequencies = new HashMap<>();
+
+            while ((bit = bis.readBit()) != -1) {
+                bitPosition = bis.getBitPosition() - 1; // 获取当前位的位置
+
+                if (bit == 0) {
+                    currentNode = currentNode.left;
                 } else {
-                    // 记录被删除的整数位置
-                    deletePositions.add(startPos + bitPosition / 8);
+                    currentNode = currentNode.right;
                 }
-                currentNode = root;
-                decodedIntegers++;
-            }
-        }
 
-        System.out.println("第一遍解码完成，共解码整数数量：" + decodedIntegers);
-        System.out.println("被删除的整数值：" + valueToDelete);
-        System.out.println("对应的指针位置（近似）：");
-        for (long pos : deletePositions) {
-            System.out.println("    位置：" + pos);
-        }
+                // 如果到达叶子节点，表示一个整数解码完成
+                if (currentNode.left == null && currentNode.right == null) {
+                    int value = currentNode.value;
 
-        // 重新构建霍夫曼树和编码
-        HuffmanNode newRoot = buildHuffmanTree(frequencies);
-        Map<Integer, HuffmanCode> huffmanCodes = new HashMap<>();
-        generateCodes(newRoot, 0L, 0, huffmanCodes);
+                    frequencies.put(value, frequencies.getOrDefault(value, 0) + 1);
 
-        // 保存新的霍夫曼树
-        saveHuffmanTree(newRoot);
-
-        // 准备进行第二遍解码和重新编码
-        System.out.println("客户端3开始第二遍解码并重新编码数据...");
-
-        // 重新定位到数据开始位置
-        bis = new BitInputStream(compressedData);
-        currentNode = root;
-
-        // 准备写入新数据
-        raf.setLength(startPos); // 截断文件，准备写入新的压缩数据
-        raf.seek(startPos);
-
-        BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(raf.getFD()));
-
-        long bitBuffer = 0L;
-        int bitBufferLength = 0;
-
-        decodedIntegers = 0;
-
-        while ((bit = bis.readBit()) != -1) {
-            if (bit == 0) {
-                currentNode = currentNode.left;
-            } else {
-                currentNode = currentNode.right;
-            }
-
-            if (currentNode.left == null && currentNode.right == null) {
-                int value = currentNode.value;
-
-                if (value != valueToDelete) {
-                    // 获取新的编码
-                    HuffmanCode code = huffmanCodes.get(value);
-
-                    bitBuffer = (bitBuffer << code.codeLength) | code.codeBits;
-                    bitBufferLength += code.codeLength;
-
-                    while (bitBufferLength >= 8) {
-                        bitBufferLength -= 8;
-                        int byteToWrite = (int) ((bitBuffer >> bitBufferLength) & 0xFF);
-                        bos.write(byteToWrite);
+                    if (value >= targetValue) {
+                        if (value < closestValue) {
+                            closestValue = value;
+                            positions.clear();
+                            positions.add(startPos + bitPosition / 8);
+                        } else if (value == closestValue) {
+                            positions.add(startPos + bitPosition / 8);
+                        }
                     }
-                } else {
-                    // 打印被删除的整数值和位置
-                    long deletePos = startPos + bis.getBytePosition() - 1;
-                    System.out.println("删除整数：" + value + "，位置：" + deletePos);
+                    currentNode = root;
+                    decodedIntegers++;
+
+                    // 调试信息：已解码的整数数量
+                    if (decodedIntegers % 10_000_000 == 0) {
+                        System.out.println("已解码整数数量：" + decodedIntegers);
+                    }
                 }
-
-                currentNode = newRoot;
-                decodedIntegers++;
             }
+
+            long endTime = System.currentTimeMillis(); // 结束计时
+
+            // 输出结果
+            if (closestValue != Integer.MAX_VALUE) {
+                System.out.println("查找完成，耗时：" + (endTime - startTime) + " 毫秒。");
+                System.out.println("找到的下一个整数值：" + closestValue);
+                System.out.println("对应的指针位置（近似）：");
+                System.out.println("    出现次数：" + positions.size());
+                for (long pos : positions) {
+                    System.out.println("    位置：" + pos);
+                }
+            } else {
+                System.out.println("未找到大于等于目标值的整数。");
+            }
+
+        } catch (IOException e) {
+            e.printStackTrace();
         }
-
-        // 处理剩余的位
-        if (bitBufferLength > 0) {
-            int byteToWrite = (int) ((bitBuffer << (8 - bitBufferLength)) & 0xFF);
-            bos.write(byteToWrite);
-        }
-
-        bos.flush();
-        bos.close(); // 确保缓冲区的数据全部写入
-
-        // 获取当前文件指针位置
-        long newFilePointer = raf.getFilePointer();
-
-        // 截断文件到当前写入位置
-        raf.setLength(newFilePointer);
-
-        System.out.println("客户端3重新编码完成，文件已更新。");
     }
 
-    // 验证删除操作是否生效
-    private static void verifyDeletion(RandomAccessFile raf, long startPos, int valueToDelete) throws IOException {
-        // 加载新的霍夫曼树
-        HuffmanNode root = loadHuffmanTree();
-        if (root == null) {
-            System.out.println("无法加载霍夫曼树，无法验证删除操作。");
-            return;
+    // 构建霍夫曼树（从频率表）
+    private static HuffmanNode buildHuffmanTreeFromFrequencies(Map<Integer, Integer> frequencies) {
+        PriorityQueue<HuffmanNode> pq = new PriorityQueue<>();
+        for (Map.Entry<Integer, Integer> entry : frequencies.entrySet()) {
+            pq.add(new HuffmanNode(entry.getKey(), entry.getValue()));
         }
 
-        // 读取新的压缩数据
-        raf.seek(startPos);
-        byte[] compressedData = new byte[(int) (raf.length() - startPos)];
-        raf.readFully(compressedData);
-
-        BitInputStream bis = new BitInputStream(compressedData);
-        HuffmanNode currentNode = root;
-
-        int bit;
-        boolean valueFound = false;
-
-        while ((bit = bis.readBit()) != -1) {
-            if (bit == 0) {
-                currentNode = currentNode.left;
-            } else {
-                currentNode = currentNode.right;
-            }
-
-            if (currentNode.left == null && currentNode.right == null) {
-                int value = currentNode.value;
-
-                if (value == valueToDelete) {
-                    valueFound = true;
-                    break;
-                }
-                currentNode = root;
-            }
+        while (pq.size() > 1) {
+            HuffmanNode left = pq.poll();
+            HuffmanNode right = pq.poll();
+            HuffmanNode parent = new HuffmanNode(-1, left.frequency + right.frequency);
+            parent.left = left;
+            parent.right = right;
+            pq.add(parent);
         }
-
-        if (valueFound) {
-            System.out.println("验证结果：被删除的整数 " + valueToDelete + " 仍然存在！");
-        } else {
-            System.out.println("验证结果：被删除的整数 " + valueToDelete + " 已被成功删除。");
-        }
+        return pq.poll();
     }
 
     // 读取文件头信息
@@ -408,7 +489,7 @@ public class Client3 {
         }
     }
 
-    // 加载霍夫曼树
+    // 加载新的霍夫曼树
     private static HuffmanNode loadHuffmanTree() {
         try {
             ObjectInputStream ois = new ObjectInputStream(new FileInputStream(HUFFMAN_TREE_FILE));
@@ -421,9 +502,28 @@ public class Client3 {
         }
     }
 
+    // 加载旧的霍夫曼树
+    private static HuffmanNode loadOldHuffmanTree() {
+        try {
+            ObjectInputStream ois = new ObjectInputStream(new FileInputStream("old_" + HUFFMAN_TREE_FILE));
+            HuffmanNode root = (HuffmanNode) ois.readObject();
+            ois.close();
+            return root;
+        } catch (IOException | ClassNotFoundException e) {
+            // 如果旧的霍夫曼树不存在，使用当前的霍夫曼树
+            return loadHuffmanTree();
+        }
+    }
+
     // 保存霍夫曼树
     private static void saveHuffmanTree(HuffmanNode root) {
         try {
+            // 备份旧的霍夫曼树
+            File oldFile = new File(HUFFMAN_TREE_FILE);
+            if (oldFile.exists()) {
+                oldFile.renameTo(new File("old_" + HUFFMAN_TREE_FILE));
+            }
+
             ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(HUFFMAN_TREE_FILE));
             oos.writeObject(root);
             oos.close();
@@ -431,26 +531,6 @@ public class Client3 {
         } catch (IOException e) {
             e.printStackTrace();
         }
-    }
-
-    // 构建霍夫曼树
-    private static HuffmanNode buildHuffmanTree(int[] frequencies) {
-        PriorityQueue<HuffmanNode> pq = new PriorityQueue<>();
-        for (int i = 1; i <= MAX_VALUE; i++) {
-            if (frequencies[i] > 0) {
-                pq.add(new HuffmanNode(i, frequencies[i]));
-            }
-        }
-
-        while (pq.size() > 1) {
-            HuffmanNode left = pq.poll();
-            HuffmanNode right = pq.poll();
-            HuffmanNode parent = new HuffmanNode(-1, left.frequency + right.frequency);
-            parent.left = left;
-            parent.right = right;
-            pq.add(parent);
-        }
-        return pq.poll();
     }
 
     // 生成霍夫曼编码
@@ -462,6 +542,40 @@ public class Client3 {
                 generateCodes(node.left, (codeBits << 1), codeLength + 1, huffmanCodes);
                 generateCodes(node.right, (codeBits << 1) | 1, codeLength + 1, huffmanCodes);
             }
+        }
+    }
+
+    // 自定义的 OutputStream，不会在关闭时关闭 RandomAccessFile
+    static class RandomAccessFileOutputStream extends OutputStream {
+        private RandomAccessFile raf;
+
+        public RandomAccessFileOutputStream(RandomAccessFile raf) {
+            this.raf = raf;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            raf.write(b);
+        }
+
+        @Override
+        public void write(byte[] b) throws IOException {
+            raf.write(b);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            raf.write(b, off, len);
+        }
+
+        @Override
+        public void flush() throws IOException {
+            // RandomAccessFile 没有 flush 方法
+        }
+
+        @Override
+        public void close() throws IOException {
+            // 不关闭 RandomAccessFile
         }
     }
 
@@ -513,6 +627,7 @@ public class Client3 {
     static class ClientData {
         private static int closestValue;
         private static List<Long> positions;
+        private static Map<Integer, Integer> frequencies;
 
         public static int getClosestValue() {
             return closestValue;
@@ -528,6 +643,14 @@ public class Client3 {
 
         public static void setPositions(List<Long> pos) {
             positions = pos;
+        }
+
+        public static Map<Integer, Integer> getFrequencies() {
+            return frequencies;
+        }
+
+        public static void setFrequencies(Map<Integer, Integer> freq) {
+            frequencies = freq;
         }
     }
 }
