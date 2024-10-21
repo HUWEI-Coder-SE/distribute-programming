@@ -24,42 +24,42 @@ public class Client3 {
             ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
 
             // 请求读取权限
-            System.out.println("客户端3请求读取权限。");
+            // System.out.println("客户端3请求读取权限。");
             oos.writeObject("read");
             String response = (String) ois.readObject();
             if ("read_granted".equals(response)) {
-                System.out.println("客户端3获得读取权限，开始查找数据...");
+                // System.out.println("客户端3获得读取权限，开始查找数据...");
                 // 执行查找任务
                 searchAndDelete();
             }
 
             // 请求写入权限
-            System.out.println("客户端3请求写入权限。");
+            // System.out.println("客户端3请求写入权限。");
             oos.writeObject("write");
             response = (String) ois.readObject();
             if ("write_granted".equals(response)) {
-                System.out.println("客户端3获得写入权限，开始删除和更新数据...");
+                // System.out.println("客户端3获得写入权限，开始删除和更新数据...");
                 // 执行删除和写入操作
                 performDeletionAndUpdate();
 
                 // 通知服务器写入完成
                 oos.writeObject("write_complete");
-                System.out.println("客户端3已完成写入操作，通知服务器。");
+                // System.out.println("客户端3已完成写入操作，通知服务器。");
             }
 
             // 请求退出前，再次进行查找操作
-            System.out.println("客户端3请求再次读取权限以进行查找操作。");
+            // System.out.println("客户端3请求再次读取权限以进行查找操作。");
             oos.writeObject("read");
             response = (String) ois.readObject();
             if ("read_granted".equals(response)) {
-                System.out.println("客户端3获得读取权限，开始再次查找数据...");
+                // System.out.println("客户端3获得读取权限，开始再次查找数据...");
                 // 再次执行查找任务
                 searchAfterDeletion();
             }
 
             // 请求退出
             oos.writeObject("exit");
-            System.out.println("客户端3发送退出请求。");
+            // System.out.println("客户端3发送退出请求。");
 
             // 关闭连接
             ois.close();
@@ -104,7 +104,7 @@ public class Client3 {
             byte[] compressedData = new byte[(int) length];
             raf.readFully(compressedData);
 
-            System.out.println("客户端3开始解码压缩数据...");
+            // System.out.println("客户端3开始解码压缩数据...");
 
             // 使用BitInputStream逐位读取数据
             BitInputStream bis = new BitInputStream(compressedData);
@@ -149,10 +149,10 @@ public class Client3 {
                     currentNode = root;
                     decodedIntegers++;
 
-                    // 调试信息：已解码的整数数量
-                    if (decodedIntegers % 10_000_000 == 0) {
-                        System.out.println("已解码整数数量：" + decodedIntegers);
-                    }
+//                    // 调试信息：已解码的整数数量
+//                    if (decodedIntegers % 10_000_000 == 0) {
+//                        System.out.println("已解码整数数量：" + decodedIntegers);
+//                    }
                 }
             }
 
@@ -161,9 +161,8 @@ public class Client3 {
             // 输出结果
             if (closestValue != Integer.MAX_VALUE) {
                 System.out.println("查找完成，耗时：" + (endTime - startTime) + " 毫秒。");
-                System.out.println("找到的整数值：" + closestValue);
+                System.out.println("找到的整数值：" + closestValue + "共" + positions.size() + "个");
                 System.out.println("对应的指针位置（近似）：");
-                System.out.println("    出现次数：" + positions.size());
                 for (long pos : positions) {
                     System.out.println("    位置：" + pos);
                 }
@@ -207,7 +206,7 @@ public class Client3 {
             saveHuffmanTree(newRoot);
 
             // 编码数据并写入文件
-            System.out.println("客户端3开始重新编码并写入数据...");
+            // System.out.println("客户端3开始重新编码并写入数据...");
 
             // 读取文件头信息
             RandomAccessFile raf = new RandomAccessFile(FILE_NAME, "rw");
@@ -297,7 +296,7 @@ public class Client3 {
 
                     // 输出进度信息
                     if (decodedIntegers >= nextProgress) {
-                        System.out.println("已处理整数数量：" + decodedIntegers);
+                        // System.out.println("已处理整数数量：" + decodedIntegers);
                         nextProgress += progressInterval;
                     }
                 }
@@ -332,9 +331,9 @@ public class Client3 {
 
             long endTime = System.currentTimeMillis(); // 结束计时
             System.out.println("重新编码并写入数据完成，耗时：" + (endTime - startTime) + " 毫秒。");
-            System.out.println("总共重新编码整数数量：" + totalEncodedValues);
-            System.out.println("总共解码整数数量：" + decodedIntegers);
-            System.out.println("总共删除整数数量：" + deletedIntegers);
+//            System.out.println("总共重新编码整数数量：" + totalEncodedValues);
+//            System.out.println("总共解码整数数量：" + decodedIntegers);
+//            System.out.println("总共删除整数数量：" + deletedIntegers);
 
             // 验证整数数量是否一致
             if (decodedIntegers != totalEncodedValues + deletedIntegers) {
@@ -357,8 +356,8 @@ public class Client3 {
             long startPos = header[4];
             long length = header[5];
 
-            System.out.println("客户端3读取的文件头信息（删除后）：");
-            System.out.println("Part C 起始位置：" + startPos + "，长度：" + length);
+//            System.out.println("客户端3读取的文件头信息（删除后）：");
+//            System.out.println("Part C 起始位置：" + startPos + "，长度：" + length);
 
             // 检查是否越界
             long fileLength = raf.length();
@@ -382,7 +381,7 @@ public class Client3 {
             byte[] compressedData = new byte[(int) length];
             raf.readFully(compressedData);
 
-            System.out.println("客户端3开始解码新的压缩数据...");
+            // System.out.println("客户端3开始解码新的压缩数据...");
 
             // 使用BitInputStream逐位读取数据
             BitInputStream bis = new BitInputStream(compressedData);
@@ -426,10 +425,10 @@ public class Client3 {
                     currentNode = root;
                     decodedIntegers++;
 
-                    // 调试信息：已解码的整数数量
-                    if (decodedIntegers % 10_000_000 == 0) {
-                        System.out.println("已解码整数数量：" + decodedIntegers);
-                    }
+//                    // 调试信息：已解码的整数数量
+//                    if (decodedIntegers % 10_000_000 == 0) {
+//                        System.out.println("已解码整数数量：" + decodedIntegers);
+//                    }
                 }
             }
 
@@ -438,9 +437,8 @@ public class Client3 {
             // 输出结果
             if (closestValue != Integer.MAX_VALUE) {
                 System.out.println("查找完成，耗时：" + (endTime - startTime) + " 毫秒。");
-                System.out.println("找到的下一个整数值：" + closestValue);
+                System.out.println("找到的整数值：" + closestValue + " 共 " + positions.size() + " 个");
                 System.out.println("对应的指针位置（近似）：");
-                System.out.println("    出现次数：" + positions.size());
                 for (long pos : positions) {
                     System.out.println("    位置：" + pos);
                 }
